@@ -29,7 +29,7 @@ class Database_Manager ():
 		# Get all the table names in the database
 		self.execute ("SELECT name FROM sqlite_master WHERE type = 'table'")
 
-		self.tables : tuple[str] = tuple (table["name"] for table in self.fetchall ())
+		self.tables : tuple[str] = tuple (table["name"] for table in self.fetchall () if (table["name"] != "sqlite_sequence"))
 
 		self.table_classes : dict[str, type] = {}
 		for table in self.tables:
@@ -70,7 +70,7 @@ class Database_Manager ():
 
 		return tuple (dict (row) for row in self.cursor.fetchall ())
 
-	def create_table (self, _name : str, **columns: dict[str, type]) -> None:
+	def create_table (self, _name : str, foreign_keys : dict[str, str] = {}, **columns: dict[str, type]) -> None:
 		"""
 		Creates a new table in the database.
 
@@ -84,7 +84,7 @@ class Database_Manager ():
 
 		if (_name not in self.tables):
 			python_type_to_sql : dict[type, str] = { int : "INTEGER", float : "REAL", bool : "INTEGER" }
-			self.execute (f"CREATE TABLE {_name} ({_name}_id INTEGER PRIMARY KEY AUTOINCREMENT, {', '.join (f"{column} INTEGER REFERENCES {column[:-3]} ({column})" if (column.endswith ("_id")) else f"{column} {python_type_to_sql.get (typ, 'TEXT')}" for column, typ in columns.items () if (column != f"{_name}_id"))})" )
+			self.execute (f"CREATE TABLE {_name} ({_name}_id INTEGER PRIMARY KEY AUTOINCREMENT, {', '.join (f"{column} {python_type_to_sql.get (typ, 'TEXT')}" for column, typ in columns.items ())}{' , '  + ', '.join (f"{column} INTEGER REFERENCES {foreign_keys[column]}" for column in foreign_keys) if (foreign_keys) else ''})")
 			self.commit ()
 			self.add_table_class (_name)
 			self.tables += (_name,)
@@ -113,7 +113,7 @@ class Database_Manager ():
 
 		self.execute (f"PRAGMA table_info ({name})")
 
-		class_attrs : dict[str, any] = { column["name"] : None for column in self.fetchall () if (column["name"] != f"{name}_id") }
+		class_attrs : dict[str, any] = { column["name"] : None for column in self.fetchall () }
 
 		def init (self, **kwargs : dict[str, any]) -> None:
 			"""
@@ -127,10 +127,10 @@ class Database_Manager ():
 				if (key in kwargs):
 					setattr (self, key, kwargs[key])
 
-				else:
+				elif (key != f"{name}_id"):
 					raise ValueError (f"Missing required argument '{key}' for {self.__class__}")
 
-		self.table_classes[name] : type = type (name.capitalize (), (object,), { "__init__" : init, "__repr__" : lambda self : f"{self.__class__.__name__} ({', '.join (f'{key} = {value}' for key, value in self.__dict__.items ())})", **class_attrs })
+		self.table_classes[name] : type = type (name, (object,), { "__init__" : init, "__repr__" : lambda self : f"{self.__class__.__name__} ({', '.join (f'{key} = {value}' for key, value in self.__dict__.items ())})", **class_attrs })
 
 	def get_table_class (self, name : str) -> type:
 		"""
@@ -159,9 +159,8 @@ class Database_Manager ():
 			ValueError: If the class is not found in the database.
 		"""
 
-		for name, table in self.table_classes.items ():
-			if (table == cls):
-				return name
+		if (cls in self.table_classes):
+			return cls.__name__
 
 		raise ValueError (f"Class {cls} not found in database")
 
@@ -458,8 +457,12 @@ class Database_Manager ():
 		"""
 
 		for row in rows:
-			fields : dict[str, any] = { key : self.serialize_value (value) for key, value in row.__dict__.items () if not key.startswith ('_') }
-			self.execute (f"INSERT INTO {self.get_class_table (row.__class__)} ({', '.join (fields.keys ())}) VALUES ({', '.join ('?' * len (fields))})", *tuple (fields.values ()))
+			if (row.__class__.__name__ in self.tables):
+				fields : dict[str, any] = { key : self.serialize_value (value) for key, value in row.__dict__.items () if (not key.startswith ('_') and (key != f"{row.__class__.__name__}_id")) }
+				self.execute (f"INSERT INTO {row.__class__.__name__} ({', '.join (fields.keys ())}) VALUES ({', '.join ('?' * len (fields))})", *fields.values ())
+
+			else:
+				raise ValueError (f"The row is not an instance of {self.table_classes}.")
 
 		self.commit ()
 
@@ -535,4 +538,3 @@ class Database_Manager ():
 				self.execute (f"INSERT INTO {table_name} ({', '.join (row.keys ())}) VALUES ({', '.join ('?' for _ in row)})", *row.values ())
 		
 		self.commit ()
-
